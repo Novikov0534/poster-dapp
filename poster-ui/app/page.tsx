@@ -60,7 +60,7 @@ function errorText(error: unknown): string {
 }
 
 const CONTRACT_ADDRESS =
-  "0xAFb224B344F3d7548Cf204059FcA9802D70A3BE9" as const;
+  "0x0C79cE3A0f9640F33DD895D0EA07328aDCc99eC9" as const;
 
 const TOKEN_ADDRESS =
   "0xf270A22A29239eAC45Cccdb69b2539F502ab1465" as const;
@@ -70,6 +70,8 @@ const BLOCK_BATCH_SIZE = BigInt(2000);
 
 const CONTRACT_ABI = parseAbi([
   "function post(string content, string tag)",
+  "function tokenAddress() view returns (address)",
+  "function threshold() view returns (uint256)",
   "event NewPost(address indexed user, string content, string indexed tag, string tagText)",
 ]);
 
@@ -372,6 +374,40 @@ export default function Home() {
 
       setAddress(account);
       setWalletStatus("Подключено к Ethereum Sepolia.");
+      setPublishStatus("Проверяем баланс токена…");
+
+      // Читаем настройки Poster: какой токен и какой порог
+      const [posterToken, posterThreshold] = await Promise.all([
+        publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: CONTRACT_ABI,
+          functionName: "tokenAddress",
+        }),
+        publicClient.readContract({
+          address: CONTRACT_ADDRESS,
+          abi: CONTRACT_ABI,
+          functionName: "threshold",
+        }),
+      ]);
+
+      // Читаем баланс токена у пользователя
+      const userBalance = await publicClient.readContract({
+        address: posterToken,
+        abi: TOKEN_ABI,
+        functionName: "balanceOf",
+        args: [account],
+      });
+
+      if (userBalance < posterThreshold) {
+        const need = formatUnits(posterThreshold, tokenDecimals);
+        const have = formatUnits(userBalance, tokenDecimals);
+        setPublishStatus(
+          `Недостаточно токенов ${tokenSymbol} для публикации. Нужно минимум ${need}, у тебя ${have}.`,
+        );
+        setPublishing(false);
+        return;
+      }
+
       setPublishStatus("Проверяем выполнение функции post…");
 
       const { request } = await publicClient.simulateContract({
@@ -615,7 +651,7 @@ export default function Home() {
     <main className="min-h-screen bg-slate-100 px-4 py-10 text-slate-900 sm:px-6">
       <div className="mx-auto max-w-3xl">
         <p className="mb-3 text-sm font-semibold text-blue-700">
-          Лабораторные работы №2–3 · Ethereum Sepolia
+          Лабораторные работы №2–4 · Ethereum Sepolia
         </p>
 
         <h1 className="text-3xl font-bold sm:text-4xl">
@@ -624,7 +660,7 @@ export default function Home() {
 
         <p className="mt-4 text-slate-600">
           Гостевая книга в блокчейне и собственный токен ERC-20 —
-          в одном интерфейсе.
+          в одном интерфейсе. Публикация требует ≥ 10 KWN.
         </p>
 
         {/* ——— Wallet ——————————————————————— */}
@@ -821,8 +857,8 @@ export default function Home() {
           </h2>
 
           <p className="mt-2 text-sm text-slate-600">
-            Сообщения публичны. Публикация требует комиссии
-            в тестовых ETH.
+            Публикация требует минимум 10 {tokenSymbol} на балансе.
+            Сообщения публичны, транзакция стоит комиссии в тестовых ETH.
           </p>
 
           <label
