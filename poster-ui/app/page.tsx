@@ -5,15 +5,17 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
+  formatUnits,
   http,
   parseAbi,
+  parseUnits,
 } from "viem";
 import { sepolia } from "viem/chains";
 
 type EthereumProvider = {
   request: (args: {
     method: string;
-    params?: unknown[];
+    params?: unknown;
   }) => Promise<unknown>;
 };
 
@@ -40,11 +42,28 @@ function errorText(error: unknown): string {
     return error.message;
   }
 
+  if (typeof error === "object" && error !== null) {
+    const anyErr = error as { message?: string; code?: number };
+    if (anyErr.message) {
+      return anyErr.code
+        ? `${anyErr.message} (code ${anyErr.code})`
+        : anyErr.message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return "Неизвестная ошибка.";
+    }
+  }
+
   return "Неизвестная ошибка. Попробуй ещё раз.";
 }
 
 const CONTRACT_ADDRESS =
   "0xAFb224B344F3d7548Cf204059FcA9802D70A3BE9" as const;
+
+const TOKEN_ADDRESS =
+  "0xf270A22A29239eAC45Cccdb69b2539F502ab1465" as const;
 
 const DEPLOYMENT_BLOCK = BigInt(11794606);
 const BLOCK_BATCH_SIZE = BigInt(2000);
@@ -52,6 +71,18 @@ const BLOCK_BATCH_SIZE = BigInt(2000);
 const CONTRACT_ABI = parseAbi([
   "function post(string content, string tag)",
   "event NewPost(address indexed user, string content, string indexed tag, string tagText)",
+]);
+
+const TOKEN_ABI = parseAbi([
+  "function name() view returns (string)",
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function totalSupply() view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function owner() view returns (address)",
+  "function mint(address account, uint256 amount)",
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
 ]);
 
 const publicClient = createPublicClient({
@@ -64,6 +95,9 @@ const publicClient = createPublicClient({
 
 const buttonClass =
   "rounded-xl bg-blue-600 px-5 py-3 font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50";
+
+const smallButtonClass =
+  "rounded-xl border border-slate-300 px-4 py-2 text-sm hover:bg-slate-50 disabled:opacity-50";
 
 const inputClass =
   "mt-2 w-full rounded-xl border border-slate-300 bg-white p-3";
@@ -86,9 +120,29 @@ export default function Home() {
   const [feedError, setFeedError] = useState("");
   const [loaded, setLoaded] = useState(false);
 
-  // Не даём старому запросу заменить результат более нового.
-  const loadRequestId = useRef(0);
+  // — Token state ——————————————————————————
+  const [tokenBalance, setTokenBalance] = useState<bigint>(0n);
+  const [tokenDecimals, setTokenDecimals] = useState<number>(18);
+  const [tokenSymbol, setTokenSymbol] = useState<string>("KWN");
+  const [tokenOwner, setTokenOwner] = useState<string>("");
+  const [tokenLoading, setTokenLoading] = useState(false);
+  const [tokenStatus, setTokenStatus] = useState("");
 
+  const [transferTo, setTransferTo] = useState("");
+  const [transferAmount, setTransferAmount] = useState("");
+  const [transferring, setTransferring] = useState(false);
+  const [transferStatus, setTransferStatus] = useState("");
+
+  const [mintTo, setMintTo] = useState("");
+  const [mintAmount, setMintAmount] = useState("");
+  const [minting, setMinting] = useState(false);
+  const [mintStatus, setMintStatus] = useState("");
+  // ————————————————————————————————————————
+
+  const loadRequestId = useRef(0);
+  const tokenRequestId = useRef(0);
+
+  // ——— Poster feed ————————————————————————
   const loadPosts = useCallback(async () => {
     const requestId = ++loadRequestId.current;
 
@@ -109,8 +163,6 @@ export default function Home() {
 
       const collected: Post[] = [];
 
-      // Читаем небольшими диапазонами, чтобы не запрашивать
-      // всю историю одним слишком большим RPC-запросом.
       for (
         let fromBlock = DEPLOYMENT_BLOCK;
         fromBlock <= latestBlock;
@@ -157,7 +209,6 @@ export default function Home() {
 
       if (requestId !== loadRequestId.current) return;
 
-      // Сначала показываем самые новые публикации.
       collected.sort((a, b) => {
         if (a.blockNumber !== b.blockNumber) {
           return a.blockNumber > b.blockNumber ? -1 : 1;
@@ -172,9 +223,7 @@ export default function Home() {
     } catch (error) {
       if (requestId !== loadRequestId.current) return;
 
-      setFeedError(
-        `Не удалось обновить историю. ${errorText(error)}`,
-      );
+      setFeedError(`Не удалось обновить историю. ${errorText(error)}`);
       setFeedStatus("");
     } finally {
       if (requestId === loadRequestId.current) {
@@ -191,6 +240,58 @@ export default function Home() {
     };
   }, [loadPosts]);
 
+  // ——— Token data ——————————————————————————
+  const loadTokenData = useCallback(async (userAddress: string) => {
+    if (!userAddress) return;
+
+    const requestId = ++tokenRequestId.current;
+    setTokenLoading(true);
+    setTokenStatus("Читаем данные токена…");
+
+    try {
+      const [balance, decimals, symbol, owner] = await Promise.all([
+        publicClient.readContract({
+          address: TOKEN_ADDRESS,
+          abi: TOKEN_ABI,
+          functionName: "balanceOf",
+          args: [userAddress as `0x${string}`],
+        }),
+        publicClient.readContract({
+          address: TOKEN_ADDRESS,
+          abi: TOKEN_ABI,
+          functionName: "decimals",
+        }),
+        publicClient.readContract({
+          address: TOKEN_ADDRESS,
+          abi: TOKEN_ABI,
+          functionName: "symbol",
+        }),
+        publicClient.readContract({
+          address: TOKEN_ADDRESS,
+          abi: TOKEN_ABI,
+          functionName: "owner",
+        }),
+      ]);
+
+      if (requestId !== tokenRequestId.current) return;
+
+      setTokenBalance(balance);
+      setTokenDecimals(Number(decimals));
+      setTokenSymbol(symbol);
+      setTokenOwner(owner);
+      setTokenStatus("");
+    } catch (error) {
+      if (requestId !== tokenRequestId.current) return;
+
+      setTokenStatus(`Не удалось прочитать токен: ${errorText(error)}`);
+    } finally {
+      if (requestId === tokenRequestId.current) {
+        setTokenLoading(false);
+      }
+    }
+  }, []);
+
+  // ——— Wallet ——————————————————————————————
   async function connectWallet() {
     const provider = getProvider();
 
@@ -220,6 +321,7 @@ export default function Home() {
 
       setAddress(accounts[0]);
       setWalletStatus("Подключено к Ethereum Sepolia.");
+      await loadTokenData(accounts[0]);
     } catch (error) {
       setAddress("");
       setWalletStatus(errorText(error));
@@ -228,6 +330,7 @@ export default function Home() {
     }
   }
 
+  // ——— Poster publish ——————————————————————
   async function publishPost() {
     const provider = getProvider();
 
@@ -261,7 +364,6 @@ export default function Home() {
         transport: custom(provider),
       });
 
-      // Получаем актуальный аккаунт перед каждой отправкой.
       const [account] = await walletClient.requestAddresses();
 
       if (!account) {
@@ -319,30 +421,213 @@ export default function Home() {
     }
   }
 
+  // ——— Token: transfer —————————————————————
+  async function transferTokens() {
+    const provider = getProvider();
+
+    if (!provider) {
+      setTransferStatus("MetaMask не найден.");
+      return;
+    }
+
+    const to = transferTo.trim();
+    const amountText = transferAmount.trim();
+
+    if (!to || !amountText) {
+      setTransferStatus("Укажи адрес получателя и сумму.");
+      return;
+    }
+
+    setTransferring(true);
+    setTransferStatus("Проверяем данные…");
+
+    try {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0xaa36a7" }],
+      });
+
+      const walletClient = createWalletClient({
+        chain: sepolia,
+        transport: custom(provider),
+      });
+
+      const [account] = await walletClient.requestAddresses();
+
+      if (!account) {
+        throw new Error("Не выбран аккаунт MetaMask.");
+      }
+
+      const amount = parseUnits(amountText, tokenDecimals);
+
+      if (amount <= 0n) {
+        throw new Error("Сумма должна быть больше нуля.");
+      }
+
+      const { request } = await publicClient.simulateContract({
+        address: TOKEN_ADDRESS,
+        abi: TOKEN_ABI,
+        functionName: "transfer",
+        args: [to as `0x${string}`, amount],
+        account,
+      });
+
+      setTransferStatus("Подтверди перевод в MetaMask.");
+      const hash = await walletClient.writeContract(request);
+      setTransferStatus("Транзакция отправлена. Ждём подтверждение…");
+
+      await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: 180_000,
+      });
+
+      setTransferStatus("Перевод выполнен.");
+      setTransferTo("");
+      setTransferAmount("");
+      await loadTokenData(account);
+    } catch (error) {
+      setTransferStatus(errorText(error));
+    } finally {
+      setTransferring(false);
+    }
+  }
+
+  // ——— Token: mint ————————————————————————
+  async function mintTokens() {
+    const provider = getProvider();
+
+    if (!provider) {
+      setMintStatus("MetaMask не найден.");
+      return;
+    }
+
+    const to = mintTo.trim();
+    const amountText = mintAmount.trim();
+
+    if (!to || !amountText) {
+      setMintStatus("Укажи адрес получателя и сумму.");
+      return;
+    }
+
+    setMinting(true);
+    setMintStatus("Проверяем данные…");
+
+    try {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0xaa36a7" }],
+      });
+
+      const walletClient = createWalletClient({
+        chain: sepolia,
+        transport: custom(provider),
+      });
+
+      const [account] = await walletClient.requestAddresses();
+
+      if (!account) {
+        throw new Error("Не выбран аккаунт MetaMask.");
+      }
+
+      const amount = parseUnits(amountText, tokenDecimals);
+
+      if (amount <= 0n) {
+        throw new Error("Сумма должна быть больше нуля.");
+      }
+
+      const { request } = await publicClient.simulateContract({
+        address: TOKEN_ADDRESS,
+        abi: TOKEN_ABI,
+        functionName: "mint",
+        args: [to as `0x${string}`, amount],
+        account,
+      });
+
+      setMintStatus("Подтверди минт в MetaMask.");
+      const hash = await walletClient.writeContract(request);
+      setMintStatus("Транзакция отправлена. Ждём подтверждение…");
+
+      await publicClient.waitForTransactionReceipt({
+        hash,
+        timeout: 180_000,
+      });
+
+      setMintStatus("Минт выполнен.");
+      setMintTo("");
+      setMintAmount("");
+      await loadTokenData(account);
+    } catch (error) {
+      setMintStatus(errorText(error));
+    } finally {
+      setMinting(false);
+    }
+  }
+
+  // ——— Token: watchAsset (EIP-747) ——————————
+  async function addTokenToWallet() {
+    const provider = getProvider();
+    if (!provider) {
+      setTokenStatus("MetaMask не найден.");
+      return;
+    }
+
+    setTokenStatus("Открываем запрос в MetaMask…");
+
+    try {
+      const result = await provider.request({
+        method: "wallet_watchAsset",
+        params: {
+          type: "ERC20",
+          options: {
+            address: TOKEN_ADDRESS,
+            symbol: tokenSymbol,
+            decimals: tokenDecimals,
+          },
+        },
+      });
+
+      if (result) {
+        setTokenStatus(`${tokenSymbol} добавлен в MetaMask.`);
+      } else {
+        setTokenStatus("Добавление отменено.");
+      }
+    } catch (error) {
+      setTokenStatus(`Не удалось добавить токен: ${errorText(error)}`);
+    }
+  }
+
   const selectedTag = filterTag.trim();
 
   const visiblePosts = selectedTag
     ? posts.filter((post) => post.tag === selectedTag)
     : posts;
 
-  const availableTags = [...new Set(posts.map((post) => post.tag))]
-    .sort();
+  const availableTags = [...new Set(posts.map((post) => post.tag))].sort();
+
+  const balanceFormatted = formatUnits(tokenBalance, tokenDecimals);
+
+  const isOwner =
+    address &&
+    tokenOwner &&
+    address.toLowerCase() === tokenOwner.toLowerCase();
 
   return (
     <main className="min-h-screen bg-slate-100 px-4 py-10 text-slate-900 sm:px-6">
       <div className="mx-auto max-w-3xl">
         <p className="mb-3 text-sm font-semibold text-blue-700">
-          Лабораторная работа №2 · Ethereum Sepolia
+          Лабораторные работы №2–3 · Ethereum Sepolia
         </p>
 
         <h1 className="text-3xl font-bold sm:text-4xl">
-          Poster — гостевая книга
+          Poster + KWNcoin
         </h1>
 
         <p className="mt-4 text-slate-600">
-          Публикуйте сообщения в блокчейне и находите записи по тегам.
+          Гостевая книга в блокчейне и собственный токен ERC-20 —
+          в одном интерфейсе.
         </p>
 
+        {/* ——— Wallet ——————————————————————— */}
         <section className="mt-8 rounded-2xl bg-white p-6 shadow-sm">
           <h2 className="mb-4 text-xl font-semibold">
             Подключение кошелька
@@ -377,6 +662,159 @@ export default function Home() {
           </p>
         </section>
 
+        {/* ——— Token ————————————————————————— */}
+        <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm">
+          <h2 className="text-xl font-semibold">
+            Токен {tokenSymbol} (ERC-20)
+          </h2>
+
+          <p className="mt-2 text-sm text-slate-600">
+            Баланс, переводы и минт собственного токена.
+            Контракт:{" "}
+            <a
+              href={`https://sepolia.etherscan.io/address/${TOKEN_ADDRESS}#code`}
+              target="_blank"
+              rel="noreferrer"
+              className="text-blue-700 underline"
+            >
+              {TOKEN_ADDRESS.slice(0, 6)}…{TOKEN_ADDRESS.slice(-4)}
+            </a>
+          </p>
+
+          {!address && (
+            <p className="mt-4 text-sm text-slate-500">
+              Подключи MetaMask, чтобы увидеть баланс и операции.
+            </p>
+          )}
+
+          {address && (
+            <>
+              <div className="mt-5 flex flex-wrap items-center gap-3">
+                <div className="rounded-xl bg-slate-50 px-4 py-3">
+                  <p className="text-xs text-slate-500">Ваш баланс</p>
+                  <p className="text-2xl font-semibold">
+                    {balanceFormatted} {tokenSymbol}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => void loadTokenData(address)}
+                  disabled={tokenLoading}
+                  className={smallButtonClass}
+                >
+                  {tokenLoading ? "Загрузка…" : "Обновить баланс"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={addTokenToWallet}
+                  className={smallButtonClass}
+                >
+                  Добавить {tokenSymbol} в MetaMask
+                </button>
+              </div>
+
+              <p role="status" className="mt-3 text-sm">
+                {tokenStatus}
+              </p>
+
+              {/* Transfer */}
+              <div className="mt-6 border-t border-slate-200 pt-5">
+                <h3 className="text-lg font-semibold">Перевод</h3>
+
+                <label className="mt-4 block text-sm font-medium">
+                  Адрес получателя
+                </label>
+                <input
+                  type="text"
+                  value={transferTo}
+                  onChange={(e) => setTransferTo(e.target.value)}
+                  placeholder="0x…"
+                  disabled={transferring}
+                  className={inputClass}
+                />
+
+                <label className="mt-4 block text-sm font-medium">
+                  Сумма ({tokenSymbol})
+                </label>
+                <input
+                  type="text"
+                  value={transferAmount}
+                  onChange={(e) => setTransferAmount(e.target.value)}
+                  placeholder="Например: 10"
+                  disabled={transferring}
+                  className={inputClass}
+                />
+
+                <button
+                  type="button"
+                  onClick={transferTokens}
+                  disabled={transferring || !transferTo || !transferAmount}
+                  className={`mt-4 ${buttonClass}`}
+                >
+                  {transferring ? "Отправка…" : "Перевести"}
+                </button>
+
+                <p role="status" className="mt-3 break-words text-sm">
+                  {transferStatus}
+                </p>
+              </div>
+
+              {/* Mint — только владельцу */}
+              {isOwner && (
+                <div className="mt-6 border-t border-slate-200 pt-5">
+                  <h3 className="text-lg font-semibold">
+                    Минт (только владелец)
+                  </h3>
+
+                  <p className="mt-1 text-xs text-green-700">
+                    ✔ Вы владелец контракта токена.
+                  </p>
+
+                  <label className="mt-4 block text-sm font-medium">
+                    Кому начислить
+                  </label>
+                  <input
+                    type="text"
+                    value={mintTo}
+                    onChange={(e) => setMintTo(e.target.value)}
+                    placeholder="0x…"
+                    disabled={minting}
+                    className={inputClass}
+                  />
+
+                  <label className="mt-4 block text-sm font-medium">
+                    Сумма ({tokenSymbol})
+                  </label>
+                  <input
+                    type="text"
+                    value={mintAmount}
+                    onChange={(e) => setMintAmount(e.target.value)}
+                    placeholder="Например: 500"
+                    disabled={minting}
+                    className={inputClass}
+                  />
+
+                  <button
+                    type="button"
+                    onClick={mintTokens}
+                    disabled={minting || !mintTo || !mintAmount}
+                    className={`mt-4 ${buttonClass}`}
+                  >
+                    {minting ? "Чеканим…" : "Начеканить"}
+                  </button>
+
+                  <p role="status" className="mt-3 break-words text-sm">
+                    {mintStatus}
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </section>
+
+        {/* ——— Poster publish ————————————————— */}
         <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm">
           <h2 className="text-xl font-semibold">
             Новая публикация
@@ -459,6 +897,7 @@ export default function Home() {
           )}
         </section>
 
+        {/* ——— Feed —————————————————————————— */}
         <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-xl font-semibold">
@@ -577,9 +1016,7 @@ export default function Home() {
                 </a>
 
                 <div className="mt-3 flex flex-wrap gap-4 text-xs text-slate-500">
-                  <span>
-                    Блок: {post.blockNumber.toString()}
-                  </span>
+                  <span>Блок: {post.blockNumber.toString()}</span>
 
                   <a
                     href={`https://sepolia.etherscan.io/tx/${post.transactionHash}`}
